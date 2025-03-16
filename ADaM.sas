@@ -1,0 +1,216 @@
+/* Set library reference*/
+LIBNAME PharmE'/home/u62305756/RWE/Oncology';
+
+/* Import the dataset */
+PROC IMPORT DATAFILE="/home/u62305756/RWE/Oncology/adae.csv" 
+		OUT=adae DBMS=CSV REPLACE;
+	GETNAMES=YES;
+RUN;
+
+/* check for missing values */
+PROC FREQ DATA=adae;
+    TABLES AESEQ AESEV ASTDT AETERM AEREL / MISSING;
+RUN;
+
+/* identify and remove duplicates */
+PROC SORT DATA=adae NODUPKEY OUT=ADAE_CLEAN;
+    BY USUBJID AETERM ASTDT;
+RUN;
+
+/* Create Derived Variables (ADT and ASTDY) */
+DATA ADAE_DERIVED;
+    SET ADAE_CLEAN;
+
+    /* Ensure date formats */
+    FORMAT ADT ASTDT_NUM RFSTDTC_NUM DATE9.;
+
+    /* Convert RFSTDTC (Reference Start Date) to Numeric */
+    IF NOT MISSING(RFSTDTC) THEN RFSTDTC_NUM = INPUT(RFSTDTC, YYMMDD10.);
+    ELSE RFSTDTC_NUM = .; /* Handle missing reference dates */
+
+    /* Convert ASTDT (Adverse Event Start Date) to Numeric, if necessary */
+    IF NOT MISSING(ASTDT) THEN ASTDT_NUM = INPUT(ASTDT, YYMMDD10.);
+    ELSE ASTDT_NUM = .;
+
+    /* Derive ADT (Analysis Date) */
+    ADT = ASTDT_NUM;
+
+    /* Derive ASTDY (Analysis Start Day) */
+    IF NOT MISSING(ASTDT_NUM) AND NOT MISSING(RFSTDTC_NUM) THEN
+        ASTDY = ASTDT_NUM - RFSTDTC_NUM + 1;
+    ELSE ASTDY = .; /* Handle cases where dates are missing */
+RUN;
+/* Validation */
+PROC PRINT DATA=ADAE_DERIVED (OBS=10); 
+    VAR USUBJID ASTDT RFSTDTC ASTDT_NUM RFSTDTC_NUM ADT ASTDY;
+RUN;
+
+/* Standardize severity(AESEV) and Relationship (AEREL) */
+DATA ADAE_MAPPED;
+    SET ADAE_DERIVED;
+
+    * Map severity levels;
+    IF AESEV = "MILD" THEN AESEV_N = 1;
+    ELSE IF AESEV = "MODERATE" THEN AESEV_N = 2;
+    ELSE IF AESEV = "SEVERE" THEN AESEV_N = 3;
+    ELSE AESEV_N = .;
+
+    * Map relationship categories;
+    IF AEREL = "NOT RELATED" THEN AEREL_N = 0;
+    ELSE IF AEREL = "UNLIKELY RELATED" THEN AEREL_N = 1;
+    ELSE IF AEREL = "POSSIBLY RELATED" THEN AEREL_N = 2;
+    ELSE IF AEREL = "PROBABLY RELATED" THEN AEREL_N = 3;
+    ELSE IF AEREL = "DEFINITELY RELATED" THEN AEREL_N = 4;
+    ELSE AEREL_N = .;
+RUN;
+
+/* Validated against CDISC ADaM guidelines */
+PROC CONTENTS DATA=ADAE_MAPPED ORDER=VARNUM;
+RUN;
+
+PROC FREQ DATA=ADAE_MAPPED;
+    TABLES AESEV AEREL AESEV_N AEREL_N / MISSING;
+RUN;
+
+/* Sumary table: adverse events by treatment arm */
+PROC FREQ DATA=ADAE_MAPPED;
+    TABLES ARM*AEDECOD / NOPERCENT NOCOL NOROW MISSING;
+RUN;
+
+
+PROC CONTENTS DATA=ADAE_MAPPED;
+RUN;
+
+
+PROC CONTENTS DATA=ADAE_CLEAN;
+RUN;
+
+/* Convert character to numeric */
+DATA ADAE_CONVERTED;
+    SET ADAE_CLEAN;
+
+    /* Convert AENDY and ASTDY */
+    IF NOT MISSING(AENDY) THEN AENDY_NUM = INPUT(AENDY, BEST12.);
+    IF NOT MISSING(ASTDY) THEN ASTDY_NUM = INPUT(ASTDY, BEST12.);
+
+    /* Derive ADT if missing */
+    IF NOT MISSING(ASTDT) THEN ADT = INPUT(ASTDT, YYMMDD10.);
+    FORMAT ADT DATE9.;
+
+    /* Drop old fields and rename */
+    DROP ASTDY AENDY;
+    RENAME AENDY_NUM = AENDY ASTDY_NUM = ASTDY;
+RUN;
+
+/* check integrity of key variables */
+PROC FREQ DATA=ADAE_CONVERTED;
+    TABLES ADT RFSTDTC ASTDT / MISSING;
+RUN;
+
+
+/* Kaplan-Meier survival curve for ASTDY */
+PROC LIFETEST DATA=ADAE_CONVERTED PLOTS=SURVIVAL;
+    TIME ASTDY*AENDY(0);
+    STRATA ARM;
+RUN;
+
+/* adverse event counts by sex */
+PROC FREQ DATA=ADAE_CONVERTED;
+    TABLES SEX*AEDECOD / NOPERCENT NOCOL NOROW MISSING;
+RUN;
+
+/* adverse event counts by age group */
+DATA ADAE_AGEGROUP;
+    SET ADAE_CONVERTED;
+    IF AGE < 30 THEN AGE_GROUP = "Under 30";
+    ELSE IF 30 <= AGE < 50 THEN AGE_GROUP = "30-49";
+    ELSE AGE_GROUP = "50+";
+RUN;
+
+PROC FREQ DATA=ADAE_AGEGROUP;
+    TABLES AGE_GROUP*AEDECOD / NOPERCENT NOCOL NOROW MISSING;
+RUN;
+
+/* Kaplan-Meier survial curve (stratified by sex)*/
+PROC LIFETEST DATA=ADAE_CONVERTED PLOTS=SURVIVAL;
+    TIME ASTDY*AENDY(0);
+    STRATA SEX;
+RUN;
+/* Kaplan-Meier survial curve (stratified by Age Group)*/
+PROC LIFETEST DATA=ADAE_AGEGROUP PLOTS=SURVIVAL;
+    TIME ASTDY*AENDY(0);
+    STRATA AGE_GROUP;
+RUN;
+
+/* Adverse event counts by sex and severity*/
+PROC FREQ DATA=ADAE_converted;
+    TABLES SEX*AEDECOD*AESEV / NOPERCENT NOCOL NOROW MISSING;
+RUN;
+
+/* Adverse event counts by age group and severity*/
+PROC FREQ DATA=ADAE_AGEGROUP;
+    TABLES AGE_GROUP*AEDECOD*AESEV / NOPERCENT NOCOL NOROW MISSING;
+RUN;
+
+/* Project 3 Macro to generate safety tables
+Adverse event frequency by severity*/
+%MACRO AE_SEVERITY_TABLE(DATASET=, OUTPUT=);
+    PROC FREQ DATA=&DATASET NOPRINT;
+        TABLES AEDECOD * AESEV / OUT=AE_FREQ;
+    RUN;
+    PROC PRINT DATA=AE_FREQ;
+        TITLE "Adverse Event Frequency by Severity";
+    RUN;
+%MEND AE_SEVERITY_TABLE;
+
+%AE_SEVERITY_TABLE(DATASET=ADAE_CONVERTED, OUTPUT=AE_TABLE);
+
+/*Adverse distribution by body system*/
+%MACRO AE_DISTRIBUTION_FIGURE(DATASET=);
+    %IF %SYSFUNC(EXIST(&DATASET)) %THEN %DO;
+        PROC SGPLOT DATA=&DATASET;
+            VBAR AEBODSYS / GROUP=AESEV GROUPDISPLAY=STACK;
+            TITLE "Adverse Event Distribution by Body System and Severity";
+            XAXIS LABEL="Body System";
+            YAXIS LABEL="Frequency";
+        RUN;
+    %END;
+    %ELSE %PUT ERROR: Dataset &DATASET does not exist.;
+%MEND AE_DISTRIBUTION_FIGURE;
+
+%AE_DISTRIBUTION_FIGURE(DATASET=ADAE_CONVERTED);
+
+
+/* Unresolved AEs (AEONGO='Y')*/
+%MACRO UNRESOLVED_AE_LISTING(DATASET=);
+    PROC PRINT DATA=&DATASET;
+        WHERE AEONGO='Y';
+        VAR USUBJID AETERM ASTDT AENDT AEONGO;
+        TITLE "Listing of Unresolved Adverse Events";
+    RUN;
+%MEND UNRESOLVED_AE_LISTING;
+
+%UNRESOLVED_AE_LISTING(DATASET=ADAE_MAPPED);
+
+
+/* Automated Execution of Macros*/
+%MACRO GENERATE_TLF;
+    %AE_SEVERITY_TABLE(DATASET=ADAE_CONVERTED, OUTPUT=AE_TABLE);
+    %AE_DISTRIBUTION_FIGURE(DATASET=ADAE_CONVERTED);
+    %UNRESOLVED_AE_LISTING(DATASET=ADAE_CONVERTED);
+%MEND GENERATE_TLF;
+
+%GENERATE_TLF;
+
+/* Extract Dataset and Variable Metadata*/
+PROC CONTENTS DATA=ADAE_CONVERTED OUT=DEFINE_META NOPRINT;
+RUN;
+
+PROC PRINT DATA=DEFINE_META;
+    VAR NAME TYPE LENGTH LABEL FORMAT;
+    TITLE "Metadata for Define.XML";
+RUN;
+
+
+
+
